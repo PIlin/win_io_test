@@ -2,6 +2,8 @@
 
 int main()
 {
+	SetThreadName(L"Main");
+
 	const char* szFilename = "f:/code/winio/test/datapc64_merged_bnk_textures1.forge";
 
 	FILE* f = fopen(szFilename, "rb");
@@ -36,4 +38,15 @@ int main()
 	return 0;
 }
 
+
+void SetThreadName(const wchar_t* format, ...)
+{
+	wchar_t buffer[256];
+	va_list args;
+	va_start(args, format);
+	vswprintf_s(buffer, format, args);
+	va_end(args);
+
+	HRESULT r = SetThreadDescription(GetCurrentThread(), buffer);
+}
 

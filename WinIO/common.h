@@ -7,6 +7,12 @@
 
 #include "wininclude.h"
 
+#define USE_PIX
+#include <pix3.h>
+
+#define PROF_FUNC() PIXScopedEvent(PIX_COLOR_INDEX(0), __FUNCTION__)
+#define PROF_REGION(NAME) PIXScopedEvent(PIX_COLOR_INDEX(1), NAME)
+
 using uint64 = uint64_t;
 using uint32 = uint32_t;
 using uint8 = uint8_t;
@@ -84,3 +90,5 @@ inline uint64 sum(const char* pBuf, size_t size)
 	}
 	return s;
 }
+
+void SetThreadName(const wchar_t* format, ...);

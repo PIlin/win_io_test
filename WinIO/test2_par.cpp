@@ -260,7 +260,7 @@ void Test2_Par(FILE* f, const fpos_t fsizePos)
 	std::vector<std::thread> workers;
 
 
-	const uint32 hw = std::thread::hardware_concurrency();
+	const uint32 hw = std::min<uint32>(std::thread::hardware_concurrency(), maxBuffers);
 	//const uint32 hw = 1;
 	const uint32 workerCount = std::max(hw, 2u) - 1; // max(hw-1, 1)
 	//const uint32 workerCount = std::max(hw, 1u); // max(hw-1, 1)

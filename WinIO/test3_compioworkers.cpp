@@ -65,6 +65,8 @@ struct SFileInfo
 
 static bool PushMoreRequests(SBuffer* pBuffers, size_t bufCount, SFileInfo& fi)
 {
+	PROF_FUNC();
+
 	SBuffer* pBufEnd = pBuffers + bufCount;
 	for (; pBuffers < pBufEnd; ++pBuffers)
 	{
@@ -106,6 +108,7 @@ struct SWorkerState
 	STimestamp sumTime{};
 	STimestamp pushTime{};
 	STimestamp readTime{};
+	uint32 idx = 0;
 };
 
 struct alignas(128) SState
@@ -125,6 +128,10 @@ static_assert(sizeof(SState) % SState::alignment == 0, "Broken alignment");
 
 static void WorkerFunc(SWorkerState& state)
 {
+	SetThreadName(L"Worker_%u", state.idx);
+
+	PROF_FUNC();
+
 	uint64 s = 0;
 	STimestamp popTime{};
 	STimestamp sumTime{};
@@ -139,6 +146,7 @@ static void WorkerFunc(SWorkerState& state)
 		OVERLAPPED* pOverlapped = nullptr;
 		BOOL res;
 		{
+			PROF_REGION("GetQueuedCompletionStatus");
 			STsRegion reg(popTime);
 			res = GetQueuedCompletionStatus(state.pFi->hComp, &transferred, &key, &pOverlapped, INFINITE);
 		}
@@ -166,6 +174,7 @@ static void WorkerFunc(SWorkerState& state)
 			readTime += (STimestamp::now() - buf.pushTime);
 
 			{
+				PROF_REGION("sum");
 				STsRegion reg(sumTime);
 				s += sum(buf.pBuf.get(), transferred);
 			}
@@ -207,30 +216,41 @@ static void WorkerFunc(SWorkerState& state)
 
 void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 {
+	PROF_FUNC();
+
 	using namespace Test3;
 
-	HANDLE hFile = CreateFileA(szFilename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
-	if (hFile == INVALID_HANDLE_VALUE)
+	
+	HANDLE hFile;
 	{
-		const DWORD err = GetLastError();
-		std::cerr << "Failed to open file, err " << err << std::endl;
-		return;
+		PROF_REGION("CreateFileA");
+		hFile = CreateFileA(szFilename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+		if (hFile == INVALID_HANDLE_VALUE)
+		{
+			const DWORD err = GetLastError();
+			std::cerr << "Failed to open file, err " << err << std::endl;
+			return;
+		}
 	}
 	SHandleCloser fileCloser(hFile);
 
 
 	const uint32 hw = std::thread::hardware_concurrency();
-	const int maxBuffers = hw * 1;
+	const int maxBuffers = 16;
 
 	//DWORD compHw = 1;
 	DWORD compHw = hw;
-	HANDLE hComp = CreateIoCompletionPort(hFile, NULL, s_fileCompKey, compHw);
-	if (hComp == INVALID_HANDLE_VALUE)
+	HANDLE hComp;
 	{
-		const DWORD err = GetLastError();
-		std::cerr << "Failed to create completion port, err " << err << std::endl;
-		return;
+		PROF_REGION("CreateIoCompletionPort");
+		hComp = CreateIoCompletionPort(hFile, NULL, s_fileCompKey, compHw);
+		if (hComp == INVALID_HANDLE_VALUE)
+		{
+			const DWORD err = GetLastError();
+			std::cerr << "Failed to create completion port, err " << err << std::endl;
+			return;
+		}
 	}
 	SHandleCloser compCloser(hComp);
 
@@ -242,9 +262,9 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 		buffers.emplace_back(std::unique_ptr<char[]>(new char[bufSize]), bufSize);
 	}
 
-	//const uint32 workerCount = std::max(hw, 2u) - 1;
+	const uint32 workerCount = std::max(hw, 2u) - 1;
 	//const uint32 workerCount = 1;
-	const uint32 workerCount = hw;
+	//const uint32 workerCount = hw;
 
 	SFileInfo fi;
 	fi.fsizePos = fsizePos;
@@ -257,6 +277,7 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 	std::unique_ptr<SState[]> states(new SState[workerCount]);
 	for (uint32 i = 0; i < workerCount; ++i)
 	{
+		states[i].s.idx = i;
 		states[i].s.pFi = &fi;
 		workers.emplace_back(std::thread(&WorkerFunc, std::ref(states[i].s)));
 	}
@@ -277,10 +298,12 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 	}
 
 	{
+		PROF_REGION("WaitForSingleObject hBufDoneEvent");
 		STsRegion tsreg(waitingForResultTime);
 		WaitForSingleObject(fi.hBufDoneEvent, INFINITE);
 	}
 	{
+		PROF_REGION("PostQueuedCompletionStatus");
 		STsRegion tsreg(stoppingTime);
 		for (uint32 i = 0; i < workerCount; ++i)
 			PostQueuedCompletionStatus(hComp, 0, s_stopCompKey, nullptr);
