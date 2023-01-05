@@ -1,5 +1,6 @@
 #include "tests.h"
 
+#include <array>
 #include <algorithm>
 #include <functional>
 #include <iostream>
@@ -16,7 +17,7 @@ static const ULONG_PTR s_stopCompKey = 28;
 static const ULONG_PTR s_finishedCompKey = 20;
 
 static constexpr bool s_singleRequestThread = false;
-static constexpr bool s_unbufferedIo = false;
+static constexpr bool s_unbufferedIo = true;
 
 
 //struct SOnExit
@@ -32,25 +33,50 @@ struct SHandleCloser
 	SHandleCloser(HANDLE h) : h(h) {}
 	~SHandleCloser() 
 	{ 
-		if (h != INVALID_HANDLE_VALUE)
-		{
-			CloseHandle(h);
-		}
+		Close();
 	}
 
 	SHandleCloser(const SHandleCloser&) = delete;
 	SHandleCloser& operator=(const SHandleCloser&) = delete;
 
-	SHandleCloser(SHandleCloser&&) = default;
-	SHandleCloser& operator=(SHandleCloser&&) = default;
+	SHandleCloser(SHandleCloser&& o) noexcept
+	{
+		Close();
+		std::swap(h, o.h);
+	}
+	SHandleCloser& operator=(SHandleCloser&& o) noexcept
+	{
+		Close();
+		std::swap(h, o.h);
+		return *this;
+	}
+
+	void Close()
+	{
+		if (h != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(h);
+			h = INVALID_HANDLE_VALUE;
+		}
+	}
 
 	HANDLE h = INVALID_HANDLE_VALUE;
 };
 
 
+struct AlignedArrDeleter
+{
+	void operator()(void* ptr)
+	{
+		_aligned_free(ptr);
+	}
+};
+using AlignedUniquePtr = std::unique_ptr<char[], AlignedArrDeleter>;
+
+
 struct SBuffer final : public OVERLAPPED
 {
-	SBuffer(std::unique_ptr<char[]> p, size_t s)
+	SBuffer(AlignedUniquePtr p, size_t s)
 		: pBuf(std::move(p))
 		, bufSize(s)
 	{
@@ -62,7 +88,7 @@ struct SBuffer final : public OVERLAPPED
 	//SBuffer(SBuffer&&) = default;
 	//SBuffer& operator=(SBuffer&&) = default;
 
-	std::unique_ptr<char[]> pBuf;
+	AlignedUniquePtr pBuf;
 	size_t bufSize;
 
 	STimestamp pushTime;
@@ -248,7 +274,7 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 	using namespace Test3;
 
 	
-	HANDLE hFile;
+	SHandleCloser hFile;
 	{
 		DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
 		if (s_unbufferedIo)
@@ -259,15 +285,13 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 		PROF_REGION("CreateFileA");
 		hFile = CreateFileA(szFilename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
 			flags, NULL);
-		if (hFile == INVALID_HANDLE_VALUE)
+		if (hFile.h == INVALID_HANDLE_VALUE)
 		{
 			const DWORD err = GetLastError();
 			std::cerr << "Failed to open file, err " << err << std::endl;
 			return;
 		}
 	}
-	SHandleCloser fileCloser(hFile);
-
 
 	const uint32 hw = std::thread::hardware_concurrency();
 	const int maxBuffers = 32;
@@ -277,7 +301,7 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 	SHandleCloser comp = [&]()
 	{
 		PROF_REGION("CreateIoCompletionPort");
-		SHandleCloser h = CreateIoCompletionPort(hFile, NULL, s_fileCompKey, compHw);
+		SHandleCloser h = CreateIoCompletionPort(hFile.h, NULL, s_fileCompKey, compHw);
 		if (h.h == INVALID_HANDLE_VALUE)
 		{
 			const DWORD err = GetLastError();
@@ -300,11 +324,13 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 
 	const size_t bufSize = 512 * 1024;
 	//const size_t bufSize = 4 * 1024 * 1024;
+	const size_t bufAlignment = 4096;
+
 
 	std::vector<SBuffer> buffers;
 	for (int i = 0; i < maxBuffers; ++i)
 	{
-		buffers.emplace_back(std::unique_ptr<char[]>(new char[bufSize]), bufSize);
+		buffers.emplace_back(AlignedUniquePtr((char*)_aligned_malloc(bufSize, bufAlignment)), bufSize);
 	}
 
 	const uint32 workerCount = std::max(hw, 2u) - 1;
@@ -313,7 +339,7 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 
 	SFileInfo fi;
 	fi.fsizePos = fsizePos;
-	fi.hFile = hFile;
+	fi.hFile = hFile.h;
 	fi.hComp = comp.h;
 	fi.hCompFinished = compFinished.h;
 	fi.hBufDoneEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
