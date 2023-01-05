@@ -13,6 +13,9 @@ namespace Test3
 
 static const ULONG_PTR s_fileCompKey = 42;
 static const ULONG_PTR s_stopCompKey = 28;
+static const ULONG_PTR s_finishedCompKey = 20;
+
+static constexpr bool s_singleRequestThread = false;
 
 //struct SOnExit
 //{
@@ -23,9 +26,23 @@ static const ULONG_PTR s_stopCompKey = 28;
 
 struct SHandleCloser
 {
+	SHandleCloser() = default;
 	SHandleCloser(HANDLE h) : h(h) {}
-	~SHandleCloser() { CloseHandle(h); }
-	HANDLE h;
+	~SHandleCloser() 
+	{ 
+		if (h != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(h);
+		}
+	}
+
+	SHandleCloser(const SHandleCloser&) = delete;
+	SHandleCloser& operator=(const SHandleCloser&) = delete;
+
+	SHandleCloser(SHandleCloser&&) = default;
+	SHandleCloser& operator=(SHandleCloser&&) = default;
+
+	HANDLE h = INVALID_HANDLE_VALUE;
 };
 
 
@@ -57,6 +74,7 @@ struct SFileInfo
 
 	HANDLE hFile;
 	HANDLE hComp;
+	HANDLE hCompFinished;
 	
 	HANDLE hBufDoneEvent;
 	std::atomic<int> activeBufCount = {};
@@ -181,7 +199,14 @@ static void WorkerFunc(SWorkerState& state)
 			if (keepPushing)
 			{
 				STsRegion reg(pushTime);
-				keepPushing = PushMoreRequests(&buf, 1, *state.pFi);
+				if constexpr (s_singleRequestThread)
+				{
+					PostQueuedCompletionStatus(state.pFi->hCompFinished, 0, s_finishedCompKey, pOverlapped);
+				}
+				else
+				{
+					keepPushing = PushMoreRequests(&buf, 1, *state.pFi);
+				}
 			}
 			if (!keepPushing)
 			{
@@ -237,24 +262,36 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 
 
 	const uint32 hw = std::thread::hardware_concurrency();
-	const int maxBuffers = 16;
+	const int maxBuffers = 32;
 
 	//DWORD compHw = 1;
 	DWORD compHw = hw;
-	HANDLE hComp;
+	SHandleCloser comp = [&]()
 	{
 		PROF_REGION("CreateIoCompletionPort");
-		hComp = CreateIoCompletionPort(hFile, NULL, s_fileCompKey, compHw);
-		if (hComp == INVALID_HANDLE_VALUE)
+		SHandleCloser h = CreateIoCompletionPort(hFile, NULL, s_fileCompKey, compHw);
+		if (h.h == INVALID_HANDLE_VALUE)
 		{
 			const DWORD err = GetLastError();
 			std::cerr << "Failed to create completion port, err " << err << std::endl;
-			return;
 		}
-	}
-	SHandleCloser compCloser(hComp);
+		return h;
+	}();
+
+	SHandleCloser compFinished = [&]()
+	{
+		PROF_REGION("CreateIoCompletionPort 2");
+		SHandleCloser h = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, s_finishedCompKey, compHw);
+		if (h.h == INVALID_HANDLE_VALUE)
+		{
+			const DWORD err = GetLastError();
+			std::cerr << "Failed to create completion port, err " << err << std::endl;
+		}
+		return h;
+	}();
 
 	const size_t bufSize = 512 * 1024;
+	//const size_t bufSize = 4 * 1024 * 1024;
 
 	std::vector<SBuffer> buffers;
 	for (int i = 0; i < maxBuffers; ++i)
@@ -269,7 +306,8 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 	SFileInfo fi;
 	fi.fsizePos = fsizePos;
 	fi.hFile = hFile;
-	fi.hComp = hComp;
+	fi.hComp = comp.h;
+	fi.hCompFinished = compFinished.h;
 	fi.hBufDoneEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 	SHandleCloser bufDoneEventCloser(fi.hBufDoneEvent);
 
@@ -281,7 +319,7 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 		states[i].s.pFi = &fi;
 		workers.emplace_back(std::thread(&WorkerFunc, std::ref(states[i].s)));
 	}
-
+	
 	STimestamp sumTime{};
 	STimestamp readTime{};
 	//STimestamp freeBufferFetchTime{};
@@ -291,22 +329,61 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 
 	auto startTime = ts::now();
 
+	bool keepPushing = false;
 	{
 		STsRegion tsreg(workPushTime);
 		fi.activeBufCount += (int)buffers.size();
-		PushMoreRequests(buffers.data(), buffers.size(), fi);
+		keepPushing = PushMoreRequests(buffers.data(), buffers.size(), fi);
 	}
 
+	if constexpr (s_singleRequestThread)
+	{
+		while (keepPushing || fi.activeBufCount.load() > 0)
+		{
+			STsRegion tsreg(workPushTime);
+			DWORD transferred = 0;
+			ULONG_PTR key = 0;
+			OVERLAPPED* pOverlapped = nullptr;
+			BOOL res;
+			{
+				PROF_REGION("GetQueuedCompletionStatus");
+				res = GetQueuedCompletionStatus(compFinished.h, &transferred, &key, &pOverlapped, INFINITE);
+			}
+			if (res == FALSE)
+			{
+				{
+					const DWORD err = GetLastError();
+					std::cerr << "Failed to get completion status, err " << err << std::endl;
+					exit(3);
+					return;
+				}
+			}
+
+			if (keepPushing)
+			{
+				SBuffer& buf = *static_cast<SBuffer*>(pOverlapped);
+				keepPushing = PushMoreRequests(&buf, 1, fi);
+			}
+			
+			if (!keepPushing)
+			{
+				fi.activeBufCount.fetch_sub(1);
+			}
+		}
+	}
+	else
 	{
 		PROF_REGION("WaitForSingleObject hBufDoneEvent");
 		STsRegion tsreg(waitingForResultTime);
 		WaitForSingleObject(fi.hBufDoneEvent, INFINITE);
 	}
+
+
 	{
 		PROF_REGION("PostQueuedCompletionStatus");
 		STsRegion tsreg(stoppingTime);
 		for (uint32 i = 0; i < workerCount; ++i)
-			PostQueuedCompletionStatus(hComp, 0, s_stopCompKey, nullptr);
+			PostQueuedCompletionStatus(comp.h, 0, s_stopCompKey, nullptr);
 
 		for (auto& t : workers)
 			t.join();
