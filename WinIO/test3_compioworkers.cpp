@@ -16,6 +16,8 @@ static const ULONG_PTR s_stopCompKey = 28;
 static const ULONG_PTR s_finishedCompKey = 20;
 
 static constexpr bool s_singleRequestThread = false;
+static constexpr bool s_unbufferedIo = false;
+
 
 //struct SOnExit
 //{
@@ -248,9 +250,15 @@ void Test3_CompIOWorkers(const char* szFilename, const fpos_t fsizePos)
 	
 	HANDLE hFile;
 	{
+		DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
+		if (s_unbufferedIo)
+		{
+			flags |= FILE_FLAG_NO_BUFFERING;
+		}
+
 		PROF_REGION("CreateFileA");
 		hFile = CreateFileA(szFilename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+			flags, NULL);
 		if (hFile == INVALID_HANDLE_VALUE)
 		{
 			const DWORD err = GetLastError();
