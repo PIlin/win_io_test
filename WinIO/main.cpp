@@ -20,15 +20,16 @@ int main()
 	fpos_t fsizePos = 0;
 	res = fgetpos(f, &fsizePos);
 
-	for (int i = 0; i < 3; ++i)
+	for (int i = 0; i < 1; ++i)
 	{
-		res = fseek(f, 0, SEEK_SET);
-		Test1_Seq(f, fsizePos);
-
-		res = fseek(f, 0, SEEK_SET);
-		Test2_Par(f, fsizePos);
+		//res = fseek(f, 0, SEEK_SET);
+		//Test1_Seq(f, fsizePos);
+		//
+		//res = fseek(f, 0, SEEK_SET);
+		//Test2_Par(f, fsizePos);
 
 		Test3_CompIOWorkers(szFilename, fsizePos);
+		Test4_DStorage(szFilename, fsizePos);
 	}
 
 	int isEof = feof(f);

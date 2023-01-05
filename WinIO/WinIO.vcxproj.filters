@@ -5,6 +5,7 @@
     <ClCompile Include="test1_seq.cpp" />
     <ClCompile Include="test2_par.cpp" />
     <ClCompile Include="test3_compioworkers.cpp" />
+    <ClCompile Include="test4_dstorage.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="wininclude.h" />
