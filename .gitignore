@@ -3,3 +3,4 @@ test/
 WinIO/x64/
 x64/
 *.user
+packages/
